@@ -1,0 +1,33 @@
+# Run from the repo root with ./duck.sh, or directly:
+#   docker compose -f docker/docker-compose.yml --env-file docker/.env up -d --build
+services:
+  duckdb:
+    build:
+      context: .
+      args:
+        DUCKDB_VERSION: "2.0.0"
+    image: duckdb-snowflake-iceberg:2.0.0
+    container_name: duckdb-iceberg
+    env_file:
+      - .env
+    environment:
+      DUCKDB_PATH: /data/warehouse.duckdb
+      PARQUET_DIR: /data/parquet
+      # DuckDB's credential_chain provider reads ~/.aws/credentials + config here.
+      AWS_SHARED_CREDENTIALS_FILE: /root/.aws/credentials
+      AWS_CONFIG_FILE: /root/.aws/config
+    volumes:
+      # Host folder ./data holds warehouse.duckdb and parquet/ for Power BI.
+      - ../data:/data
+      # Your AWS profiles, read-only. AWS_DIR comes from .env (defaults to ~/.aws, which
+      # Docker Desktop expands on Windows too). Remove this line if you use static keys.
+      - ${AWS_DIR:-~/.aws}:/root/.aws:ro
+    # "loop" keeps the container alive and re-syncs every REFRESH_INTERVAL_SECONDS.
+    command: ["loop"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "test", "-f", "/data/warehouse.duckdb"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 120s

@@ -1,0 +1,8 @@
+# Local analysis environment for notebooks/explore.ipynb
+# DuckDB must match the version that wrote data/warehouse.duckdb (the Docker image uses 2.0.0).
+duckdb==2.0.0
+jupyterlab>=4.2
+pandas>=2.2
+pytz>=2024.1   # needed by DuckDB .df() for TIMESTAMP WITH TIME ZONE columns
+pyarrow>=17
+matplotlib>=3.9
