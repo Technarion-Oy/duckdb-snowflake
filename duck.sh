@@ -10,6 +10,8 @@
 #   ./duck.sh shell       DuckDB CLI, read-only, on data/warehouse.duckdb
 #   ./duck.sh live        DuckDB CLI querying the S3 Iceberg tables directly (no local copy)
 #   ./duck.sh status      what Power BI will see: tables, row counts, last refresh
+#   ./duck.sh export-sql  write the whole refresh as plain SQL to data/refresh.sql (inspect or edit it)
+#   ./duck.sh refresh-sql run that SQL with the DuckDB CLI instead of the Python job
 #   ./duck.sh notebook    JupyterLab (local venv) with notebooks/explore.ipynb on data/warehouse.duckdb
 set -euo pipefail
 
@@ -57,6 +59,11 @@ case "$cmd" in
       SELECT table_schema, table_name, table_type FROM information_schema.tables WHERE table_schema = 'reporting' ORDER BY 3, 2;
       SELECT * FROM reporting.refresh_log ORDER BY refreshed_at DESC LIMIT 10;"
     ;;
+  export-sql)
+    need_docker; need_env; "${COMPOSE[@]}" run --rm duckdb export-sql
+    echo "Open data/refresh.sql, or run it with: ./duck.sh refresh-sql"
+    ;;
+  refresh-sql) need_docker; need_env; "${COMPOSE[@]}" run --rm duckdb refresh-sql ;;
   notebook)
     VENV="$ROOT/notebooks/.venv"
     if [[ ! -x "$VENV/bin/jupyter" ]]; then
@@ -68,6 +75,6 @@ case "$cmd" in
     exec "$VENV/bin/jupyter" lab --notebook-dir="$ROOT/notebooks" "$ROOT/notebooks/explore.ipynb"
     ;;
   help|*)
-    sed -n '2,15p' "$0"
+    sed -n '2,17p' "$0"
     ;;
 esac

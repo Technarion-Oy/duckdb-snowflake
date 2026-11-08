@@ -31,9 +31,9 @@ warehouse runs for reporting.
 | `docker/Dockerfile` | DuckDB 2.0.0 (Python + CLI) with `httpfs` and `iceberg` pre-installed |
 | `docker/docker-compose.yml` | the `duckdb` service; mounts `./data` and `~/.aws` (read-only) |
 | `docker/.env.example` | S3 location + AWS settings -> copy to `docker/.env` |
-| `docker/refresh.py` | scan Iceberg tables from S3, materialise, export Parquet, build views |
+| `docker/refresh.py` | scan Iceberg tables from S3, materialise, export Parquet, build views; `--export-sql` writes the same as a SQL script |
 | `docker/sql/reporting_views.sql` | `v_sales`, `dim_date`, `v_daily_revenue` for the report |
-| `docker/entrypoint.sh` | container modes: `refresh`, `loop`, `shell`, `live` |
+| `docker/entrypoint.sh` | container modes: `refresh`, `loop`, `shell`, `live`, `export-sql`, `refresh-sql` |
 | `duck.ps1` | one-command wrapper around docker compose for Windows PowerShell |
 | `duck.sh` | same wrapper for macOS / Linux / WSL |
 | `.gitattributes` | keeps container scripts on LF endings when cloned on Windows |
@@ -80,6 +80,29 @@ Other handy commands:
 ```
 
 On macOS / Linux / WSL the same commands exist as `./duck.sh <command>`.
+
+## Plain SQL variant
+
+Everything the refresh job does is DuckDB SQL; Python only adds the loop, the atomic file
+swap and logging. To see or run that SQL yourself:
+
+```powershell
+.\duck.ps1 export-sql       # writes data\refresh.sql with your .env values filled in
+.\duck.ps1 refresh-sql      # regenerates it and runs it through the DuckDB CLI
+```
+
+`refresh.sql` contains `LOAD httpfs; LOAD iceberg;`, the `CREATE SECRET`, one
+`CREATE OR REPLACE TABLE reporting.<t> AS SELECT * FROM iceberg_scan(...)` plus `COPY ... TO
+parquet` and a `refresh_log` insert per table, the views from `docker/sql/reporting_views.sql`,
+and `CHECKPOINT`. Edit it freely and run it against any DuckDB 2.0 client:
+
+```
+duckdb data\warehouse.duckdb.tmp < data\refresh.sql
+move /Y data\warehouse.duckdb.tmp data\warehouse.duckdb
+```
+
+Write to a scratch file as shown, never to a file Power BI has open. The file is
+git-ignored because it can contain static AWS keys if you use those.
 
 ## Jupyter notebook
 

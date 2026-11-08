@@ -8,6 +8,8 @@
 #   .\duck.ps1 shell            DuckDB CLI, read-only, on data\warehouse.duckdb
 #   .\duck.ps1 live             DuckDB CLI querying the S3 Iceberg tables directly (no local copy)
 #   .\duck.ps1 status           what Power BI will see: tables, row counts, last refresh
+#   .\duck.ps1 export-sql       write the whole refresh as plain SQL to data\refresh.sql (inspect or edit it)
+#   .\duck.ps1 refresh-sql      run that SQL with the DuckDB CLI instead of the Python job
 #   .\duck.ps1 notebook         JupyterLab (local venv) with notebooks\explore.ipynb on data\warehouse.duckdb
 #   .\duck.ps1 powerbi-path     print the path to paste into the Power BI DuckDB connector
 #
@@ -60,6 +62,11 @@ switch ($Command) {
     $sql = "SELECT table_schema, table_name, table_type FROM information_schema.tables WHERE table_schema = 'reporting' ORDER BY 3, 2; SELECT * FROM reporting.refresh_log ORDER BY refreshed_at DESC LIMIT 10;"
     Invoke-Compose @("run", "--rm", "duckdb", "shell", "-c", $sql)
   }
+  "export-sql" {
+    Need-Docker; Need-Env; Invoke-Compose @("run", "--rm", "duckdb", "export-sql")
+    Write-Host "Open data\refresh.sql, or run it with: .\duck.ps1 refresh-sql"
+  }
+  "refresh-sql" { Need-Docker; Need-Env; Invoke-Compose @("run", "--rm", "duckdb", "refresh-sql") }
   "notebook" {
     $Venv = Join-Path $Root "notebooks\.venv"
     $Jupyter = Join-Path $Venv "Scripts\jupyter.exe"
@@ -73,5 +80,5 @@ switch ($Command) {
     & $Jupyter lab --notebook-dir=(Join-Path $Root "notebooks") (Join-Path $Root "notebooks\explore.ipynb")
   }
   "powerbi-path" { Write-Host (Join-Path $Root "data\warehouse.duckdb") }
-  default { Get-Content $PSCommandPath | Select-Object -Skip 1 -First 13 }
+  default { Get-Content $PSCommandPath | Select-Object -Skip 1 -First 15 }
 }

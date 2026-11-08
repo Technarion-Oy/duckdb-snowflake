@@ -7,6 +7,7 @@ data/*.duckdb.tmp
 data/*.wal
 data/parquet/*.parquet
 data/parquet/*.tmp
+data/refresh.sql        # generated; may contain AWS keys
 
 # Power BI working files
 *.pbix.bak
