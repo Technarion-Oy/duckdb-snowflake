@@ -92,6 +92,31 @@ class Config:
 
 # ----------------------------------------------------------------------------- S3 access
 def s3_secret_sql(cfg: Config) -> str:
+    """Build the S3 secret that tells DuckDB how to sign requests to the bucket.
+
+    Default (AWS_PROFILE / SSO / env vars / instance role via the AWS credential chain):
+
+        CREATE OR REPLACE SECRET s3_iceberg (
+            TYPE s3,
+            PROVIDER credential_chain,
+            PROFILE 'duckdb-reader',          -- only if AWS_PROFILE is set
+            REGION 'eu-west-1'
+        );
+
+    With static keys (AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY in .env):
+
+        CREATE OR REPLACE SECRET s3_iceberg (
+            TYPE s3,
+            KEY_ID 'AKIA...',
+            SECRET '...',
+            SESSION_TOKEN '...',              -- only if AWS_SESSION_TOKEN is set
+            REGION 'eu-west-1'
+        );
+
+    S3-compatible stores (S3_ENDPOINT set) additionally get ENDPOINT, URL_STYLE and USE_SSL.
+    The secret is temporary: it lives in this connection only and is never written to the
+    warehouse file.
+    """
     opts = ["TYPE s3"]
     if cfg.aws_key and cfg.aws_secret:
         opts += [f"KEY_ID '{sql_str(cfg.aws_key)}'", f"SECRET '{sql_str(cfg.aws_secret)}'"]
@@ -114,7 +139,23 @@ def s3_secret_sql(cfg: Config) -> str:
 
 
 def scan_sql(cfg: Config, location: str) -> str:
-    """iceberg_scan(...) call for a table folder or an explicit metadata.json path."""
+    """Build the table function that reads one Iceberg table from S3.
+
+    Table folder (the normal case; DuckDB lists <folder>/metadata/ and picks the
+    lexicographically newest *.metadata.json, which for Snowflake is the latest commit):
+
+        iceberg_scan('s3://my-bucket/snowflake/mock_data/orders', version = '?')
+
+    With ICEBERG_ALLOW_MOVED_PATHS=true (table folder was copied elsewhere):
+
+        iceberg_scan('s3://.../orders', version = '?', allow_moved_paths = true)
+
+    Pinned metadata file (ICEBERG_PATH_<TABLE> points at a *.metadata.json):
+
+        iceberg_scan('s3://.../orders/metadata/00007-1f2e....metadata.json')
+
+    The result is used as a FROM clause, e.g. SELECT * FROM iceberg_scan(...).
+    """
     if location.endswith(".metadata.json"):
         return f"iceberg_scan('{sql_str(location)}')"
     params = []
@@ -128,6 +169,13 @@ def scan_sql(cfg: Config, location: str) -> str:
 
 
 def setup_connection(con: duckdb.DuckDBPyConnection, cfg: Config) -> None:
+    """Prepare a connection for reading Iceberg from S3. Runs, in order:
+
+        LOAD httpfs;                                   -- s3:// file system
+        LOAD iceberg;                                  -- iceberg_scan / iceberg_snapshots
+        SET unsafe_enable_version_guessing = true;     -- allows version = '?' (no version-hint.text)
+        CREATE OR REPLACE SECRET s3_iceberg ( ... );   -- see s3_secret_sql()
+    """
     con.execute("LOAD httpfs; LOAD iceberg;")
     if cfg.version_guessing:
         con.execute("SET unsafe_enable_version_guessing = true")
@@ -136,6 +184,15 @@ def setup_connection(con: duckdb.DuckDBPyConnection, cfg: Config) -> None:
 
 
 def latest_snapshot(con: duckdb.DuckDBPyConnection, cfg: Config, location: str) -> tuple[int | None, str | None]:
+    """Look up which Iceberg snapshot was just read, for the refresh log. Runs:
+
+        SELECT snapshot_id, timestamp_ms
+        FROM iceberg_snapshots('s3://.../orders', version = '?')
+        ORDER BY sequence_number DESC
+        LIMIT 1;
+
+    Informational only; a failure here does not fail the refresh.
+    """
     try:
         snaps = scan_sql(cfg, location).replace("iceberg_scan(", "iceberg_snapshots(", 1).replace(", allow_moved_paths = true", "")
         row = con.execute(f"SELECT snapshot_id, timestamp_ms FROM {snaps} ORDER BY sequence_number DESC LIMIT 1").fetchone()
@@ -147,6 +204,14 @@ def latest_snapshot(con: duckdb.DuckDBPyConnection, cfg: Config, location: str) 
 
 # ----------------------------------------------------------------------------- refresh
 def run_sql_file(con: duckdb.DuckDBPyConnection, path: str) -> None:
+    """Execute every statement in a .sql file (used for sql/reporting_views.sql), i.e.
+
+        CREATE OR REPLACE VIEW reporting.v_sales AS ...;
+        CREATE OR REPLACE VIEW reporting.dim_date AS ...;
+        CREATE OR REPLACE VIEW reporting.v_daily_revenue AS ...;
+
+    Line comments are stripped and the file is split on ';'.
+    """
     if not os.path.exists(path):
         log.warning("Views file %s not found, skipping", path)
         return
@@ -159,6 +224,28 @@ def run_sql_file(con: duckdb.DuckDBPyConnection, path: str) -> None:
 
 
 def refresh_once(cfg: Config) -> None:
+    """One full refresh of the warehouse file. Against a scratch copy (<DUCKDB_PATH>.tmp):
+
+        -- setup_connection(): LOAD httpfs; LOAD iceberg; SET ...; CREATE SECRET ...;
+        CREATE SCHEMA IF NOT EXISTS reporting;
+        CREATE TABLE IF NOT EXISTS reporting.refresh_log (
+            refreshed_at TIMESTAMP, table_name VARCHAR, source VARCHAR,
+            snapshot_id BIGINT, snapshot_ts VARCHAR, row_count BIGINT, seconds DOUBLE);
+
+        -- per table in ICEBERG_TABLES (products, customers, orders):
+        CREATE OR REPLACE TABLE reporting."orders" AS
+            SELECT * FROM iceberg_scan('s3://.../orders', version = '?');
+        SELECT count(*) FROM reporting."orders";
+        COPY reporting."orders" TO '/data/parquet/orders.parquet.tmp' (FORMAT parquet, COMPRESSION zstd);
+        INSERT INTO reporting.refresh_log VALUES (now(), 'orders', 's3://.../orders', <snapshot_id>, <snapshot_ts>, <rows>, <seconds>);
+
+        -- run_sql_file(): CREATE OR REPLACE VIEW reporting.v_sales / dim_date / v_daily_revenue ...;
+        CHECKPOINT;
+
+    Then the scratch file is renamed over DUCKDB_PATH and each Parquet .tmp over its final
+    name, so Power BI (which opens the file read-only) never sees a half-written database.
+    If anything fails, the previous warehouse file is left untouched.
+    """
     started = time.time()
     os.makedirs(os.path.dirname(cfg.duckdb_path), exist_ok=True)
     os.makedirs(cfg.parquet_dir, exist_ok=True)
