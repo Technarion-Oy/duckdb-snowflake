@@ -1,0 +1,10 @@
+# Native setup (Windows / macOS / Linux). Installed into .venv by:  .\duck.ps1 setup
+# DuckDB must match the ODBC driver major.minor that Power BI uses (2.0.x).
+duckdb==2.0.0
+
+# notebooks/explore.ipynb
+jupyterlab>=4.2
+pandas>=2.2
+pyarrow>=17
+pytz>=2024.1   # needed by DuckDB .df() for TIMESTAMP WITH TIME ZONE columns
+matplotlib>=3.9

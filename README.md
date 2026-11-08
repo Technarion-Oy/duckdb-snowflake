@@ -1,9 +1,10 @@
-# Snowflake Iceberg on S3 -> DuckDB (Docker) -> Power BI
+# Snowflake Iceberg on S3 -> DuckDB -> Power BI
 
 Report on three Snowflake-managed Apache Iceberg tables (`products`, `customers`, `orders`)
 in Power BI, with DuckDB as the engine. DuckDB reads the Iceberg metadata and Parquet data
 files **directly from the S3 external volume**. Snowflake is never queried, so no Snowflake
-warehouse runs for reporting.
+warehouse runs for reporting. Everything runs natively on the Windows machine that has
+Power BI; Docker is only an option for a shared server.
 
 ```
  Snowflake writes Iceberg tables to the external volume
@@ -12,13 +13,13 @@ warehouse runs for reporting.
  s3://<bucket>/<prefix>/mock_data/{products,customers,orders}/{metadata,data}/
       |  iceberg_scan('s3://.../orders', version = '?')   (AWS read-only credentials)
       v
- DuckDB 2.0 in Docker  (docker/refresh.py, every REFRESH_INTERVAL_SECONDS)
+ DuckDB 2.0 (refresh\refresh.py, Windows Scheduled Task every REFRESH_INTERVAL_SECONDS)
       |  CREATE TABLE reporting.orders AS SELECT * FROM iceberg_scan(...)
       v
- ./data/warehouse.duckdb  +  ./data/parquet/*.parquet
+ data\warehouse.duckdb  +  data\parquet\*.parquet
       |  DuckDB ODBC driver / Power Query connector, or Parquet connector
       v
- Power BI Desktop (Windows / Windows VM)
+ Power BI Desktop
 ```
 
 ## Files
@@ -28,45 +29,45 @@ warehouse runs for reporting.
 | `create-snowflake-iceberg-tables.sql` | creates the three Iceberg tables with sample data (existing) |
 | `snowflake/02-find-s3-locations.sql` | shows the bucket/prefix and current metadata file per table; optional task to keep metadata fresh |
 | `aws/iam-read-policy.json`, `aws/README.md` | read-only S3 access for DuckDB |
-| `docker/Dockerfile` | DuckDB 2.0.0 (Python + CLI) with `httpfs` and `iceberg` pre-installed |
-| `docker/docker-compose.yml` | the `duckdb` service; mounts `./data` and `~/.aws` (read-only) |
-| `docker/.env.example` | S3 location + AWS settings -> copy to `docker/.env` |
-| `docker/refresh.py` | scan Iceberg tables from S3, materialise, export Parquet, build views; `--export-sql` writes the same as a SQL script |
-| `docker/sql/reporting_views.sql` | `v_sales`, `dim_date`, `v_daily_revenue` for the report |
-| `docker/entrypoint.sh` | container modes: `refresh`, `loop`, `shell`, `live`, `export-sql`, `refresh-sql` |
-| `duck.ps1` | one-command wrapper around docker compose for Windows PowerShell |
-| `duck.sh` | same wrapper for macOS / Linux / WSL |
-| `.gitattributes` | keeps container scripts on LF endings when cloned on Windows |
+| `.env.example` | S3 location + AWS settings -> copy to `.env` |
+| `refresh/refresh.py` | scan Iceberg tables from S3, materialise, export Parquet, build views; `--export-sql` writes the same as a SQL script |
+| `refresh/sql/reporting_views.sql` | `v_sales`, `dim_date`, `v_daily_revenue` for the report |
+| `duck.ps1` | all commands: setup, refresh, Scheduled Task, status, shell, export-sql, notebook |
+| `requirements.txt` | Python packages for `.venv` (DuckDB 2.0.0, Jupyter, pandas) |
 | `powerbi/README.md` | driver install, connection, data model, DAX starters |
-| `notebooks/explore.ipynb` | Jupyter notebook for local SQL / pandas analysis of `data/warehouse.duckdb` |
+| `notebooks/explore.ipynb` | Jupyter notebook for local SQL / pandas analysis of `data\warehouse.duckdb` |
+| `docker/` | optional image + compose for a shared Linux server (`docker/README.md`) |
 | `data/` | output folder Power BI points at (git-ignored contents) |
 
-## Quick start (Windows, Docker Desktop already installed)
+## Quick start (Windows)
 
-Open PowerShell in the repo folder. If scripts are blocked once:
+Requirements: Python 3.10+ and, for the Power BI side, the DuckDB ODBC driver 2.0.x
+(see `powerbi\README.md`). Open PowerShell in the repo folder. If scripts are blocked once:
 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
 ```powershell
 # 1. Snowflake: run create-snowflake-iceberg-tables.sql, then snowflake\02-find-s3-locations.sql
 #    to get the S3 root and to flush Iceberg metadata for the fresh tables.
-# 2. AWS: give DuckDB read access to that prefix (aws\README.md).
+# 2. AWS: give DuckDB read access to that prefix (aws\README.md). SSO: aws sso login --profile <name>
 
-# 3. Configure
-.\duck.ps1 init                     # creates docker\.env
-#    edit docker\.env: ICEBERG_S3_ROOT, AWS_REGION, AWS_PROFILE + AWS_DIR (or static keys)
+# 3. Install: .venv with DuckDB 2.0.0 + notebook packages, DuckDB CLI via winget (optional)
+.\duck.ps1 setup
 
-# 4. First sync (builds the image on first run, ~1-2 min)
+# 4. Configure
+.\duck.ps1 init                     # creates .env
+#    edit .env: ICEBERG_S3_ROOT, AWS_REGION, AWS_PROFILE (or static keys)
+
+# 5. First sync
 .\duck.ps1 refresh
 .\duck.ps1 status                   # tables, row counts, snapshot ids, refresh log
 
-# 5. Keep it fresh in the background (default every 15 min, survives reboots via restart policy)
-.\duck.ps1 up
-.\duck.ps1 logs
+# 6. Keep it fresh: Scheduled Task every REFRESH_INTERVAL_SECONDS (default 15 min)
+.\duck.ps1 register-task
 
-# 6. Power BI (same machine): see powerbi\README.md
+# 7. Power BI: see powerbi\README.md
 .\duck.ps1 powerbi-path             # prints C:\...\data\warehouse.duckdb to paste into the connector
 
-# 7. Optional: analyse locally in Jupyter (creates notebooks\.venv on first run)
+# 8. Optional: analyse locally in Jupyter
 .\duck.ps1 notebook
 ```
 
@@ -76,10 +77,13 @@ Other handy commands:
 .\duck.ps1 shell                    # DuckDB CLI, read-only, on data\warehouse.duckdb
 .\duck.ps1 live                     # DuckDB CLI with views products/customers/orders that
                                     # query S3 directly:  SELECT count(*) FROM orders;
-.\duck.ps1 down
+.\duck.ps1 loop                     # foreground loop instead of the Scheduled Task
+.\duck.ps1 unregister-task
 ```
 
-On macOS / Linux / WSL the same commands exist as `./duck.sh <command>`.
+The Scheduled Task runs as your user while you are logged in, so it can use your SSO profile.
+For an always-on refresh on a server nobody logs into, use `docker\` with an instance role or
+a dedicated read-only IAM user.
 
 ## Plain SQL variant
 
@@ -93,7 +97,7 @@ swap and logging. To see or run that SQL yourself:
 
 `refresh.sql` contains `LOAD httpfs; LOAD iceberg;`, the `CREATE SECRET`, one
 `CREATE OR REPLACE TABLE reporting.<t> AS SELECT * FROM iceberg_scan(...)` plus `COPY ... TO
-parquet` and a `refresh_log` insert per table, the views from `docker/sql/reporting_views.sql`,
+parquet` and a `refresh_log` insert per table, the views from `refresh\sql\reporting_views.sql`,
 and `CHECKPOINT`. Edit it freely and run it against any DuckDB 2.0 client:
 
 ```
@@ -106,16 +110,15 @@ git-ignored because it can contain static AWS keys if you use those.
 
 ## Jupyter notebook
 
-`notebooks/explore.ipynb` opens `data/warehouse.duckdb` read-only with the DuckDB Python
-package, so it can run while the container keeps refreshing. It lists tables and the refresh
-log, has ad-hoc SQL cells, a few charts (revenue by region, monthly trend, product mix),
-pandas hand-off, a CSV export, and an optional cell that queries the Iceberg tables on S3
-directly using the same settings as the container. Start it with `./duck.sh notebook`, or
-point any Python 3.10+ with `pip install -r notebooks/requirements.txt` at it.
+`notebooks\explore.ipynb` opens `data\warehouse.duckdb` read-only with the DuckDB Python
+package, so it can run while a refresh happens. It lists tables and the refresh log, has
+ad-hoc SQL cells, a few charts (revenue by region, monthly trend, product mix), pandas
+hand-off, a CSV export, and an optional cell that queries the Iceberg tables on S3 directly
+using the same settings as the refresh. Start it with `.\duck.ps1 notebook`.
 
 ## How DuckDB reads the Iceberg tables
 
-`refresh.py` runs this (values from `docker/.env`):
+`refresh.py` runs this (values from `.env`):
 
 ```sql
 LOAD httpfs; LOAD iceberg;
@@ -139,7 +142,7 @@ largest is the newest. To pin an exact file instead, set
 
 Snowflake-managed tables publish Iceberg metadata to S3 shortly after DML, or immediately
 when `SYSTEM$GET_ICEBERG_TABLE_INFORMATION` is called. Step 3 in
-`snowflake/02-find-s3-locations.sql` has an optional task that calls it every 15 minutes
+`snowflake\02-find-s3-locations.sql` has an optional task that calls it every 15 minutes
 so DuckDB's view of the data never lags.
 
 Each refresh writes to `warehouse.duckdb.tmp` and renames it over the live file, so Power BI
@@ -150,15 +153,15 @@ place if a refresh fails.
 
 | Symptom | Cause / fix |
 |---------|-------------|
-| `403 Forbidden` / `Access Denied` | IAM policy must allow `s3:ListBucket` on the bucket (prefix condition) and `s3:GetObject` on `<prefix>/*`. SSE-KMS buckets also need `kms:Decrypt`. |
-| `No metadata file found` / version guessing fails | `ICEBERG_S3_ROOT` or table folder wrong. Compare with the `metadataLocation` from `snowflake/02-find-s3-locations.sql`. Table folders are lower case as in the DDL `BASE_LOCATION`. |
+| `403 Forbidden` / `Access Denied` | IAM policy must allow `s3:ListBucket` on the bucket (prefix condition) and `s3:GetObject` on `<prefix>/*`. SSE-KMS buckets also need `kms:Decrypt`. SSO users: `aws sso login` again. |
+| `No metadata file found` / version guessing fails | `ICEBERG_S3_ROOT` or table folder wrong. Compare with the `metadataLocation` from `snowflake\02-find-s3-locations.sql`. Table folders are lower case as in the DDL `BASE_LOCATION`. |
 | Row counts behind Snowflake | Metadata not yet published. Call `SYSTEM$GET_ICEBERG_TABLE_INFORMATION('orders')` in Snowflake or enable the task. |
 | `Unable to connect to ... amazonaws.com` / wrong region | Set `AWS_REGION` to the bucket's region. |
-| `credential_chain` finds nothing | `~/.aws` not mounted or profile missing. Set `AWS_PROFILE`, or use static keys in `docker/.env`. SSO profiles need `aws sso login` on the host first. |
-| Power BI cannot open the file | ODBC driver version must be 2.0.x to read a DuckDB 2.0 file. Close Power BI before deleting `data/`. |
+| Scheduled Task runs but nothing changes | Check `Get-ScheduledTaskInfo 'DuckDB Iceberg Refresh'` for the last result; run `.\duck.ps1 refresh` in a terminal to see the error. |
+| Power BI cannot open the file | ODBC driver version must be 2.0.x to read a DuckDB 2.0 file. Close Power BI before deleting `data\`. |
 
 ## Versions
 
-DuckDB 2.0.0 (image, Python package, CLI), DuckDB ODBC 2.0.0.1, DuckDB Power Query connector 0.2.0.
-Pin a different DuckDB with `DUCKDB_VERSION` in `docker/docker-compose.yml`, and install the
+DuckDB 2.0.0 (Python package and CLI), DuckDB ODBC 2.0.0.1, DuckDB Power Query connector 0.2.0.
+Pin a different DuckDB in `requirements.txt` (and `docker/docker-compose.yml`), and install the
 matching ODBC driver on the Power BI side.

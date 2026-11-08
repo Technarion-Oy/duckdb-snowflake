@@ -1,6 +1,6 @@
-# DuckDB 2.0 runtime for pulling Snowflake-managed Iceberg tables into a local
-# DuckDB file that Power BI reads. Python is used only as the driver script
-# (token handling, retries, scheduling); the DuckDB CLI is included for ad-hoc SQL.
+# Optional: DuckDB 2.0 runtime for a shared server that refreshes the Power BI warehouse
+# file unattended. On a single Windows workstation use duck.ps1 natively instead.
+# Build context is the repo root (see docker-compose.yml): it copies refresh/ and docker/.
 FROM python:3.12-slim
 
 ARG DUCKDB_VERSION=2.0.0
@@ -32,8 +32,9 @@ RUN pip install --no-cache-dir "duckdb==${DUCKDB_VERSION}"
 RUN python -c "import duckdb; c = duckdb.connect(); c.execute('INSTALL httpfs; INSTALL iceberg;'); print('extensions installed')"
 
 WORKDIR /app
-COPY refresh.py entrypoint.sh /app/
-COPY sql /app/sql
+COPY refresh/refresh.py /app/refresh.py
+COPY refresh/sql /app/sql
+COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 VOLUME ["/data"]

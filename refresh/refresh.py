@@ -3,6 +3,9 @@
 Read Snowflake-managed Apache Iceberg tables straight from S3 with DuckDB and
 materialise them into a local DuckDB file (+ Parquet) for Power BI.
 
+Runs natively (python refresh/refresh.py, settings from ./.env) or inside the optional
+Docker image for a shared server (docker/). Same code, same SQL.
+
 Snowflake is NOT contacted. DuckDB's iceberg extension reads the table's
 metadata/*.metadata.json, manifests and Parquet data files directly from the
 external volume bucket using your AWS credentials.
@@ -36,6 +39,33 @@ import time
 import duckdb
 
 log = logging.getLogger("refresh")
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)                       # repo root (parent of refresh/)
+DEFAULT_ENV_FILE = os.path.join(ROOT, ".env")
+
+
+def load_env_file(path: str) -> int:
+    """Load KEY=VALUE lines from a .env file into os.environ (existing variables win).
+
+    Comments (#) and blank lines are skipped, surrounding quotes are removed. Returns the
+    number of variables set. Missing file -> 0.
+    """
+    if not os.path.exists(path):
+        return 0
+    n = 0
+    for raw in open(path, encoding="utf-8"):
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+            n += 1
+    return n
 
 
 # ----------------------------------------------------------------------------- config
@@ -80,10 +110,12 @@ class Config:
         self.s3_use_ssl = env_bool("S3_USE_SSL", True)
 
         # Output
-        self.duckdb_path = env("DUCKDB_PATH", "/data/warehouse.duckdb")
-        self.parquet_dir = env("PARQUET_DIR", "/data/parquet")
+        # Native default: <repo>/data/...  (the Docker image sets DUCKDB_PATH/PARQUET_DIR to /data/...)
+        self.duckdb_path = os.path.abspath(env("DUCKDB_PATH", os.path.join(ROOT, "data", "warehouse.duckdb")))
+        self.parquet_dir = os.path.abspath(env("PARQUET_DIR", os.path.join(ROOT, "data", "parquet")))
         self.interval = int(env("REFRESH_INTERVAL_SECONDS", "900") or "0")
-        self.views_sql = env("VIEWS_SQL", os.path.join(os.path.dirname(__file__), "sql", "reporting_views.sql"))
+        self.views_sql = env("VIEWS_SQL", os.path.join(HERE, "sql", "reporting_views.sql"))
+        self.env_file = ""
 
         if not self.s3_root.startswith(("s3://", "s3a://", "gs://", "az://", "abfss://", "r2://")):
             log.warning("ICEBERG_S3_ROOT %r is not an object-store URL; treating it as a local path (test mode)", self.s3_root)
@@ -342,6 +374,7 @@ def export_sql(cfg: Config) -> str:
         "-- One full refresh of the Power BI warehouse as plain DuckDB SQL.",
         f"-- Run:  duckdb {cfg.duckdb_path}.tmp < refresh.sql && mv {cfg.duckdb_path}.tmp {cfg.duckdb_path}",
         "-- Write to a scratch file as above, never to a file Power BI currently has open.",
+        f"-- Settings came from {cfg.env_file}" if cfg.env_file else "-- Settings came from environment variables",
     ]
     if cfg.aws_key:
         out.append("-- WARNING: contains static AWS keys. Keep this file out of git and chat.")
@@ -378,6 +411,8 @@ def export_sql(cfg: Config) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--env-file", default=DEFAULT_ENV_FILE, metavar="PATH",
+                        help=f"settings file to load into the environment (default: {DEFAULT_ENV_FILE}; real env vars win)")
     parser.add_argument("--once", action="store_true", help="refresh once and exit (ignore REFRESH_INTERVAL_SECONDS)")
     parser.add_argument("--print-sql", action="store_true", help="print the secret + iceberg_scan SQL and exit (used by 'live' mode)")
     parser.add_argument("--export-sql", nargs="?", const="-", metavar="PATH",
@@ -385,7 +420,14 @@ def main() -> int:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+    loaded = load_env_file(args.env_file)
+    if loaded:
+        log.info("Loaded %d settings from %s", loaded, args.env_file)
+    elif not os.environ.get("ICEBERG_S3_ROOT"):
+        log.error("No settings found: create %s (copy .env.example) or set the variables in the environment", args.env_file)
+        return 2
     cfg = Config()
+    cfg.env_file = args.env_file if loaded else ""
 
     if args.export_sql:
         script = export_sql(cfg)

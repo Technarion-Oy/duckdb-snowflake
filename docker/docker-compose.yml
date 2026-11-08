@@ -1,15 +1,17 @@
-# Run from the repo root with ./duck.sh, or directly:
-#   docker compose -f docker/docker-compose.yml --env-file docker/.env up -d --build
+# Optional: shared-server deployment. From the repo root:
+#   docker compose -f docker/docker-compose.yml --env-file .env up -d --build
+# or use docker/server.sh. Settings come from the same ./.env as the native setup.
 services:
   duckdb:
     build:
-      context: .
+      context: ..
+      dockerfile: docker/Dockerfile
       args:
         DUCKDB_VERSION: "2.0.0"
     image: duckdb-snowflake-iceberg:2.0.0
     container_name: duckdb-iceberg
     env_file:
-      - .env
+      - ../.env
     environment:
       DUCKDB_PATH: /data/warehouse.duckdb
       PARQUET_DIR: /data/parquet

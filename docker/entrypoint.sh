@@ -1,5 +1,5 @@
 #!/bin/sh
-# Container entrypoint. Modes:
+# Container entrypoint (shared-server deployment). Modes:
 #   refresh  - read the Iceberg tables from S3 once, write /data/warehouse.duckdb + Parquet, exit
 #   loop     - same, repeated every REFRESH_INTERVAL_SECONDS (default 900)
 #   shell    - open the DuckDB CLI read-only on the reporting file
